@@ -5,7 +5,6 @@ import { useSearchParams } from "next/navigation";
 import PatientBanner from "./PatientBanner";
 import { PatientVitalSigns } from "./PatientVitalSigns";
 
-
 // PKCE utilities
 function base64urlencode(str: ArrayBuffer) {
     return btoa(String.fromCharCode.apply(null, new Uint8Array(str) as any))
@@ -33,9 +32,7 @@ const PractitionerLaunch = () => {
     const searchParams = useSearchParams();
     const [iss, setIss] = useState<string | null>(null);
     const [launch, setLaunch] = useState<string | null>(null);
-    const [authorizationEndpoint, setAuthorizationEndpoint] = useState<string | null>(
-        null
-    );
+    const [authorizationEndpoint, setAuthorizationEndpoint] = useState<string | null>(null);
     const [tokenEndpoint, setTokenEndpoint] = useState<string | null>(null);
     const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
     const [authCode, setAuthCode] = useState<string | null>(null);
@@ -44,27 +41,50 @@ const PractitionerLaunch = () => {
     const clientId = "ddd5883d-63eb-4ee7-91b4-0dbe58d2ed39";
     const redirectUri = "http://localhost:3001";
 
-    // Extract iss and launch from searchParams or window.location.search
     useEffect(() => {
         let issParam = searchParams.get("iss");
         let launchParam = searchParams.get("launch");
+
         if (!issParam || !launchParam) {
             const urlParams = new URLSearchParams(window.location.search);
-            issParam = urlParams.get("iss");
-            launchParam = urlParams.get("launch");
+            issParam = issParam || urlParams.get("iss") || sessionStorage.getItem("iss");
+            launchParam = launchParam || urlParams.get("launch") || sessionStorage.getItem("launch");
         }
+
+        if (issParam) sessionStorage.setItem("iss", issParam);
+        if (launchParam) sessionStorage.setItem("launch", launchParam);
+
         setIss(issParam);
         setLaunch(launchParam);
     }, [searchParams]);
 
-    // On mount, try to load endpoints from sessionStorage
+
+    useEffect(() => {
+        if (!iss || !launch) return;
+
+        const prevIss = sessionStorage.getItem("prev_iss");
+        const prevLaunch = sessionStorage.getItem("prev_launch");
+        const isNewSession = iss !== prevIss || launch !== prevLaunch;
+
+        if (isNewSession) {
+            sessionStorage.removeItem("pkce_code_verifier");
+            sessionStorage.removeItem("authorization_endpoint");
+            sessionStorage.removeItem("token_endpoint");
+            localStorage.removeItem("token_response"); // <-- Add this line
+
+            sessionStorage.setItem("prev_iss", iss);
+            sessionStorage.setItem("prev_launch", launch);
+        }
+    }, [iss, launch]);
+
+
+    // On mount, try to load endpoints and token from storage
     useEffect(() => {
         const cachedTokenEndpoint = sessionStorage.getItem("token_endpoint");
         if (cachedTokenEndpoint) setTokenEndpoint(cachedTokenEndpoint);
         const cachedAuthorizationEndpoint = sessionStorage.getItem("authorization_endpoint");
         if (cachedAuthorizationEndpoint) setAuthorizationEndpoint(cachedAuthorizationEndpoint);
 
-        // Load tokenResponse from localStorage if available
         const storedTokenResponse = localStorage.getItem("token_response");
         if (storedTokenResponse) {
             setTokenResponse(JSON.parse(storedTokenResponse));
@@ -84,11 +104,10 @@ const PractitionerLaunch = () => {
         });
     }, [iss, launch]);
 
-    // PKCE and authorization URL construction
+    // Build PKCE and authorization URL
     useEffect(() => {
         if (!iss || !launch || !authorizationEndpoint) return;
 
-        // If tokenResponse with access_token exists and not expired, skip building authorization URL
         if (
             tokenResponse?.access_token &&
             tokenResponse.expires_at &&
@@ -116,31 +135,36 @@ const PractitionerLaunch = () => {
         });
     }, [iss, launch, authorizationEndpoint, tokenResponse]);
 
-    // Redirect to authorization URL if needed
+    // ⏳ Delayed redirect to authorization URL if needed
     useEffect(() => {
-        // Only redirect if no valid tokenResponse with non-expired token
+        let timeout: NodeJS.Timeout;
+
         if (
             iss &&
             launch &&
             authorizationUrl &&
             !(tokenResponse?.access_token && tokenResponse.expires_at > Date.now())
         ) {
-            window.location.href = authorizationUrl;
+            timeout = setTimeout(() => {
+                window.location.href = authorizationUrl;
+            }, 1000); // 1-second delay to ensure parameters are loaded
         }
+
+        return () => {
+            if (timeout) clearTimeout(timeout);
+        };
     }, [authorizationUrl, iss, launch, tokenResponse]);
 
-    // Extract code from URL on mount
+    // Extract code from URL
     useEffect(() => {
         const urlParams = new URLSearchParams(window.location.search);
         const code = urlParams.get("code");
         if (code) {
             setAuthCode(code);
-            // Optionally: clean code param from URL
-            // window.history.replaceState({}, document.title, window.location.pathname);
         }
     }, []);
 
-    // Exchange code for token when code and tokenEndpoint are present
+    // Exchange code for token
     useEffect(() => {
         if (authCode && tokenEndpoint) {
             const codeVerifier = sessionStorage.getItem("pkce_code_verifier");
@@ -162,7 +186,6 @@ const PractitionerLaunch = () => {
                     },
                 })
                 .then((res) => {
-                    // Add expires_at for token expiry management
                     const expiresAt = Date.now() + (res.data.expires_in ?? 0) * 1000;
                     const tokenData = { ...res.data, expires_at: expiresAt };
                     setTokenResponse(tokenData);
@@ -233,7 +256,6 @@ const PractitionerLaunch = () => {
         marginBottom: 24,
     };
 
-    // Show error if token fetch failed
     if (tokenResponse?.error) {
         return (
             <div style={{ ...containerStyle, maxWidth: 600 }}>
@@ -249,15 +271,18 @@ const PractitionerLaunch = () => {
         );
     }
 
-    // Show PatientBanner and PatientVitalSigns if token and patient available
     if (tokenResponse?.access_token && tokenResponse.patient && iss) {
+        const showBanner = tokenResponse.need_patient_banner !== false;
+
         return (
             <div style={containerStyle}>
-                <PatientBanner
-                    accessToken={tokenResponse.access_token}
-                    patientId={tokenResponse.patient}
-                    iss={iss}
-                />
+                {showBanner && (
+                    <PatientBanner
+                        accessToken={tokenResponse.access_token}
+                        patientId={tokenResponse.patient}
+                        iss={iss}
+                    />
+                )}
                 <PatientVitalSigns
                     patientId={tokenResponse.patient}
                     accessToken={tokenResponse.access_token}
@@ -267,7 +292,6 @@ const PractitionerLaunch = () => {
         );
     }
 
-    // Default render fallback (show your usual debug info)
     return (
         <div style={containerStyle}>
             <div style={sectionStyle}>
